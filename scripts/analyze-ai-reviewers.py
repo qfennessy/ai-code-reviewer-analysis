@@ -271,7 +271,15 @@ Return a JSON array of generalized summaries in the same order."""
         response_text = generate_content(model, model_type, prompt)
         generalized = json.loads(response_text)
 
+        # Validate response is a list of strings with correct length
+        if not isinstance(generalized, list):
+            print("  Warning: LLM returned non-list response, skipping generalization")
+            return concerns
         if len(generalized) != len(concerns):
+            print(f"  Warning: LLM returned {len(generalized)} summaries for {len(concerns)} concerns")
+            return concerns
+        if not all(isinstance(s, str) for s in generalized):
+            print("  Warning: LLM returned non-string summaries, skipping generalization")
             return concerns
 
         result = []
@@ -343,14 +351,31 @@ def export_analysis_data(
 
     if anonymize_summaries and model:
         print("  Generalizing concern summaries with LLM...")
-        concern_dicts = generalize_summaries_with_llm(model, model_type, concern_dicts)
+        # Collect all unique summaries to generalize once for consistency
+        all_summaries = set(c["summary"] for c in concern_dicts)
+        for cluster in cluster_dicts:
+            all_summaries.add(cluster["representative_summary"])
+            for c in cluster["concerns"]:
+                all_summaries.add(c["summary"])
+
+        # Generalize all unique summaries in one call
+        unique_summaries = list(all_summaries)
+        dummy_concerns = [{"summary": s} for s in unique_summaries]
+        generalized = generalize_summaries_with_llm(model, model_type, dummy_concerns)
+
+        # Build mapping from original to generalized
+        summary_map = {orig: gen["summary"] for orig, gen in zip(unique_summaries, generalized)}
+
+        # Apply mapping consistently to all concerns
+        for c in concern_dicts:
+            c["summary"] = summary_map.get(c["summary"], c["summary"])
 
         for cluster in cluster_dicts:
-            cluster["concerns"] = generalize_summaries_with_llm(
-                model, model_type, cluster["concerns"]
+            cluster["representative_summary"] = summary_map.get(
+                cluster["representative_summary"], cluster["representative_summary"]
             )
-            if cluster["concerns"]:
-                cluster["representative_summary"] = cluster["concerns"][0]["summary"]
+            for c in cluster["concerns"]:
+                c["summary"] = summary_map.get(c["summary"], c["summary"])
 
     return {
         "version": "1.0",
