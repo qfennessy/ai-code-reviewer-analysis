@@ -42,7 +42,7 @@ Add your own by editing `AI_REVIEWERS` in the script.
 ### Setup
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/ai-code-reviewer-analysis.git
+git clone https://github.com/qfennessy/ai-code-reviewer-analysis.git
 cd ai-code-reviewer-analysis
 
 # Install Google AI SDK (choose one)
@@ -193,7 +193,7 @@ MIT
 
 ## Author
 
-Created by [Quentin](https://github.com/qredek) based on analysis of AI code reviewers in production.
+Created by [Quentin](https://github.com/qfennessy) based on analysis of AI code reviewers in production.
 
 ## Related
 
