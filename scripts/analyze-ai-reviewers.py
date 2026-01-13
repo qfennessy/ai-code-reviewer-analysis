@@ -989,10 +989,12 @@ def generate_report(
     stats: dict[str, ReviewerStats],
     clusters: list[ConcernCluster],
     prs_analyzed: int,
-    repo: str
+    repo: str,
+    anonymize: bool = False
 ) -> str:
     """Generate markdown report of analysis."""
     today = date.today().isoformat()
+    display_repo = "anonymized-repository" if anonymize else repo
 
     # Get active reviewers (those with comments)
     active_reviewers = [r for r in stats.keys() if stats[r].total_comments > 0]
@@ -1000,7 +1002,7 @@ def generate_report(
     lines = [
         "# LLM-as-Judge Analysis Results",
         "",
-        f"**Repository**: {repo}",
+        f"**Repository**: {display_repo}",
         f"**Date**: {today}",
         f"**PRs Analyzed**: {prs_analyzed}",
         f"**Total Concerns Extracted**: {sum(s.total_concerns for s in stats.values())}",
@@ -1270,6 +1272,18 @@ def main():
 
         mode = "anonymized" if args.anonymize else "raw"
         print(f"Data saved to: {args.save_data} ({mode} mode)")
+
+        # Also save markdown report
+        report_path = args.save_data.rsplit(".", 1)[0] + ".md"
+        if args.anonymize:
+            # Generate anonymized version of report
+            anon_report = generate_report(stats, clusters, len(pr_numbers), REPO, anonymize=True)
+            with open(report_path, "w") as f:
+                f.write(anon_report)
+        else:
+            with open(report_path, "w") as f:
+                f.write(report)
+        print(f"Report saved to: {report_path}")
 
     # Output
     if args.output:

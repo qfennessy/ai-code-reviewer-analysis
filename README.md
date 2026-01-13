@@ -36,8 +36,9 @@ Add your own by editing `AI_REVIEWERS` in the script.
 ### Prerequisites
 
 - Python 3.11+
+- [Poetry](https://python-poetry.org/) for dependency management
 - [GitHub CLI](https://cli.github.com/) (`gh`) installed and authenticated
-- Google AI API key OR Google Cloud project with Vertex AI
+- Google Cloud project with Vertex AI (recommended) OR Google AI API key
 
 ### Setup
 
@@ -45,30 +46,19 @@ Add your own by editing `AI_REVIEWERS` in the script.
 git clone https://github.com/qfennessy/ai-code-reviewer-analysis.git
 cd ai-code-reviewer-analysis
 
-# Install Google AI SDK (choose one)
-pip install google-generativeai  # For Google AI Studio API key
-# OR
-pip install google-genai  # For Vertex AI
+# Install dependencies with Poetry
+poetry install
 ```
 
 ## Usage
 
-### With Google AI API Key (Easiest)
-
-```bash
-# Get a free API key from https://aistudio.google.com/
-export GOOGLE_API_KEY=your-api-key
-
-python scripts/analyze-ai-reviewers.py --repo owner/repo --prs 50
-```
-
-### With Vertex AI
+### With Vertex AI (Recommended)
 
 ```bash
 # Authenticate with Google Cloud
 gcloud auth application-default login
 
-python scripts/analyze-ai-reviewers.py \
+poetry run python scripts/analyze-ai-reviewers.py \
   --vertex \
   --project your-gcp-project \
   --repo owner/repo \
@@ -93,35 +83,42 @@ python scripts/analyze-ai-reviewers.py \
 
 ```bash
 # Quick analysis of 20 PRs
-python scripts/analyze-ai-reviewers.py --repo facebook/react --prs 20
+poetry run python scripts/analyze-ai-reviewers.py \
+  --vertex --project your-gcp-project \
+  --repo facebook/react --prs 20
 
 # Comprehensive analysis saved to file
-python scripts/analyze-ai-reviewers.py \
+poetry run python scripts/analyze-ai-reviewers.py \
+  --vertex --project your-gcp-project \
   --repo your-org/your-repo \
   --prs 200 \
   --output analysis-report.md
 
 # Verbose mode to see what's happening
-python scripts/analyze-ai-reviewers.py \
+poetry run python scripts/analyze-ai-reviewers.py \
+  --vertex --project your-gcp-project \
   --repo your-org/your-repo \
   --prs 50 \
   --verbose
 
 # Save raw analysis data for further processing
-python scripts/analyze-ai-reviewers.py \
+poetry run python scripts/analyze-ai-reviewers.py \
+  --vertex --project your-gcp-project \
   --repo your-org/your-repo \
   --prs 50 \
   --save-data analysis.json
 
 # Save anonymized data for sharing (strips identifiers)
-python scripts/analyze-ai-reviewers.py \
+poetry run python scripts/analyze-ai-reviewers.py \
+  --vertex --project your-gcp-project \
   --repo your-org/your-repo \
   --prs 50 \
   --save-data analysis-anon.json \
   --anonymize
 
 # Anonymize with LLM-generalized summaries (most thorough)
-python scripts/analyze-ai-reviewers.py \
+poetry run python scripts/analyze-ai-reviewers.py \
+  --vertex --project your-gcp-project \
   --repo your-org/your-repo \
   --prs 50 \
   --save-data analysis-anon.json \
@@ -177,14 +174,20 @@ A concern is "unique" if only one reviewer raised it on that PR. The **unique ra
 
 ## Data Preservation
 
-Use `--save-data` to export the full analysis for further processing or sharing.
+Use `--save-data` to export the full analysis for further processing or sharing. Both a JSON data file and a markdown report are generated.
 
 ### Raw Mode
 
 Saves all extracted data including original text snippets, file paths, and PR numbers:
 
 ```bash
-python scripts/analyze-ai-reviewers.py --repo owner/repo --prs 50 --save-data analysis.json
+poetry run python scripts/analyze-ai-reviewers.py \
+  --vertex --project your-gcp-project \
+  --repo owner/repo --prs 50 --save-data analysis.json
+
+# Creates:
+#   analysis.json - Full data with all identifiers
+#   analysis.md   - Markdown report
 ```
 
 ### Anonymized Mode
@@ -192,8 +195,14 @@ python scripts/analyze-ai-reviewers.py --repo owner/repo --prs 50 --save-data an
 For sharing analysis results without revealing codebase details:
 
 ```bash
-python scripts/analyze-ai-reviewers.py --repo owner/repo --prs 50 \
+poetry run python scripts/analyze-ai-reviewers.py \
+  --vertex --project your-gcp-project \
+  --repo owner/repo --prs 50 \
   --save-data analysis.json --anonymize
+
+# Creates:
+#   analysis.json - Anonymized data
+#   analysis.md   - Markdown report (with "anonymized-repository")
 ```
 
 Anonymization applies:
@@ -209,7 +218,9 @@ Anonymization applies:
 For thorough anonymization, add `--anonymize-summaries` to strip code-specific details from concern summaries using the LLM:
 
 ```bash
-python scripts/analyze-ai-reviewers.py --repo owner/repo --prs 50 \
+poetry run python scripts/analyze-ai-reviewers.py \
+  --vertex --project your-gcp-project \
+  --repo owner/repo --prs 50 \
   --save-data analysis.json --anonymize --anonymize-summaries
 ```
 
@@ -227,9 +238,13 @@ For large analyses (500+ PRs), consider running in batches:
 
 ```bash
 # Run 200 PRs at a time
-python scripts/analyze-ai-reviewers.py --repo owner/repo --prs 200 --output batch1.md
+poetry run python scripts/analyze-ai-reviewers.py \
+  --vertex --project your-gcp-project \
+  --repo owner/repo --prs 200 --output batch1.md
 # Wait 1 hour
-python scripts/analyze-ai-reviewers.py --repo owner/repo --prs 200 --output batch2.md
+poetry run python scripts/analyze-ai-reviewers.py \
+  --vertex --project your-gcp-project \
+  --repo owner/repo --prs 200 --output batch2.md
 ```
 
 ## Cost
