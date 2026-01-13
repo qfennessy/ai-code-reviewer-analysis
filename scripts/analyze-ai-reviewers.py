@@ -225,8 +225,9 @@ def check_rate_limit() -> tuple[int, int]:
         )
         data = json.loads(result.stdout)
         return data.get("remaining", 5000), data.get("reset", 0)
-    except (subprocess.CalledProcessError, json.JSONDecodeError):
-        return 5000, 0  # Assume OK if we can't check
+    except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
+        print(f"\n  Warning: Could not check GitHub rate limit due to {type(e).__name__}. Assuming a low limit to be safe.")
+        return 10, 0  # Assume a very low limit to trigger a pause if needed
 
 
 def rate_limited_api_call(cmd: list[str], check_limit: bool = True) -> subprocess.CompletedProcess:
@@ -660,6 +661,8 @@ Single-concern clusters are fine for truly unique insights.
 
         # Add fallback clusters for any missing concerns
         missing_indices = set(range(len(pr_concerns))) - assigned_indices
+        if missing_indices:
+            print(f"  Warning: LLM did not assign {len(missing_indices)} concerns for PR #{pr_number}. Adding as individual clusters.")
         for idx in sorted(missing_indices):
             c = pr_concerns[idx]
             clusters.append(ConcernCluster(
