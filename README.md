@@ -267,6 +267,21 @@ AI_REVIEWERS = {
 }
 ```
 
+## Development
+
+### Running Tests
+
+```bash
+# Run all tests
+poetry run pytest
+
+# Run with verbose output
+poetry run pytest -v
+
+# Run with coverage
+poetry run pytest --cov=scripts
+```
+
 ## License
 
 MIT
