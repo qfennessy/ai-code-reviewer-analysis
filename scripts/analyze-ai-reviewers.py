@@ -34,13 +34,14 @@ License: MIT
 """
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from enum import Enum
 from typing import Optional
 
@@ -152,6 +153,220 @@ class ReviewerStats:
     concerns_by_severity: dict[str, int] = field(default_factory=dict)
     concerns_by_category: dict[str, int] = field(default_factory=dict)
     unique_catches: list[str] = field(default_factory=list)
+
+
+# =============================================================================
+# Serialization and Anonymization
+# =============================================================================
+
+def concern_to_dict(concern: Concern) -> dict:
+    """Convert a Concern dataclass to a dictionary."""
+    return {
+        "summary": concern.summary,
+        "severity": concern.severity.value,
+        "category": concern.category.value,
+        "reviewer": concern.reviewer,
+        "pr_number": concern.pr_number,
+        "original_text": concern.original_text,
+        "file_path": concern.file_path,
+        "line_number": concern.line_number,
+    }
+
+
+def cluster_to_dict(cluster: ConcernCluster) -> dict:
+    """Convert a ConcernCluster dataclass to a dictionary."""
+    return {
+        "representative_summary": cluster.representative_summary,
+        "concerns": [concern_to_dict(c) for c in cluster.concerns],
+        "reviewers": sorted(cluster.reviewers),
+        "is_unique": cluster.is_unique,
+    }
+
+
+def stats_to_dict(stats: ReviewerStats) -> dict:
+    """Convert a ReviewerStats dataclass to a dictionary."""
+    return {
+        "name": stats.name,
+        "total_comments": stats.total_comments,
+        "total_concerns": stats.total_concerns,
+        "unique_concerns": stats.unique_concerns,
+        "concerns_by_severity": stats.concerns_by_severity,
+        "concerns_by_category": stats.concerns_by_category,
+        "unique_catches": stats.unique_catches,
+    }
+
+
+class Anonymizer:
+    """Consistent anonymization of analysis data using deterministic mapping."""
+
+    def __init__(self, salt: str = ""):
+        self.salt = salt
+        self._pr_map: dict[int, str] = {}
+        self._file_map: dict[str, str] = {}
+        self._pr_counter = 0
+        self._file_counter = 0
+
+    def anonymize_pr(self, pr_number: int) -> str:
+        """Map PR number to sequential ID."""
+        if pr_number not in self._pr_map:
+            self._pr_counter += 1
+            self._pr_map[pr_number] = f"PR-{self._pr_counter:03d}"
+        return self._pr_map[pr_number]
+
+    def anonymize_file(self, file_path: str | None) -> str | None:
+        """Map file path to hashed ID, preserving extension."""
+        if not file_path:
+            return None
+        if file_path not in self._file_map:
+            ext = file_path.rsplit(".", 1)[-1] if "." in file_path else ""
+            self._file_counter += 1
+            base = f"file-{self._file_counter:03d}"
+            self._file_map[file_path] = f"{base}.{ext}" if ext else base
+        return self._file_map[file_path]
+
+    def anonymize_concern(self, concern_dict: dict) -> dict:
+        """Anonymize a single concern dictionary."""
+        return {
+            "summary": concern_dict["summary"],
+            "severity": concern_dict["severity"],
+            "category": concern_dict["category"],
+            "reviewer": concern_dict["reviewer"],
+            "pr_number": self.anonymize_pr(concern_dict["pr_number"]),
+            "original_text": None,
+            "file_path": self.anonymize_file(concern_dict.get("file_path")),
+            "line_number": None,
+        }
+
+
+def generalize_summaries_with_llm(
+    model,
+    model_type: str,
+    concerns: list[dict]
+) -> list[dict]:
+    """Use LLM to strip code-specific details from concern summaries."""
+    if not concerns:
+        return concerns
+
+    summaries = [c["summary"] for c in concerns]
+
+    prompt = f"""Generalize these code review concern summaries to remove:
+- Specific function/variable/class names
+- File paths or module names
+- Line numbers or code snippets
+- Project-specific terminology
+
+Keep the core issue type and severity clear.
+
+Examples:
+- "Missing null check in getUserEmail()" -> "Missing null check in function return value"
+- "Race condition in AuthController.validate()" -> "Race condition in validation logic"
+- "XSS vulnerability in src/components/UserInput.tsx" -> "XSS vulnerability in user input component"
+
+Summaries to generalize:
+{json.dumps(summaries, indent=2)}
+
+Return a JSON array of generalized summaries in the same order."""
+
+    try:
+        response_text = generate_content(model, model_type, prompt)
+        generalized = json.loads(response_text)
+
+        if len(generalized) != len(concerns):
+            return concerns
+
+        result = []
+        for concern, new_summary in zip(concerns, generalized):
+            updated = concern.copy()
+            updated["summary"] = new_summary
+            result.append(updated)
+        return result
+
+    except (json.JSONDecodeError, Exception) as e:
+        print(f"  Warning: Failed to generalize summaries: {type(e).__name__}")
+        return concerns
+
+
+def export_analysis_data(
+    concerns: list[Concern],
+    clusters: list[ConcernCluster],
+    stats: dict[str, ReviewerStats],
+    report: str,
+    repo: str,
+    prs_analyzed: int,
+    anonymize: bool = False,
+    anonymize_summaries: bool = False,
+    model=None,
+    model_type: str = None,
+) -> dict:
+    """Export analysis data to a dictionary for JSON serialization.
+
+    Args:
+        concerns: All extracted concerns.
+        clusters: Clustered concerns.
+        stats: Per-reviewer statistics.
+        report: Generated markdown report.
+        repo: Repository name.
+        prs_analyzed: Number of PRs analyzed.
+        anonymize: Whether to anonymize identifiers.
+        anonymize_summaries: Whether to LLM-generalize summaries.
+        model: LLM model (required if anonymize_summaries=True).
+        model_type: Model type (required if anonymize_summaries=True).
+
+    Returns:
+        Dictionary ready for JSON serialization.
+    """
+    concern_dicts = [concern_to_dict(c) for c in concerns]
+    cluster_dicts = [cluster_to_dict(c) for c in clusters]
+    stats_dicts = {name: stats_to_dict(s) for name, s in stats.items()}
+
+    if anonymize:
+        anonymizer = Anonymizer()
+
+        concern_dicts = [anonymizer.anonymize_concern(c) for c in concern_dicts]
+
+        anon_clusters = []
+        for cluster in cluster_dicts:
+            anon_cluster = {
+                "representative_summary": cluster["representative_summary"],
+                "concerns": [anonymizer.anonymize_concern(c) for c in cluster["concerns"]],
+                "reviewers": cluster["reviewers"],
+                "is_unique": cluster["is_unique"],
+            }
+            anon_clusters.append(anon_cluster)
+        cluster_dicts = anon_clusters
+
+        for stat in stats_dicts.values():
+            if anonymize_summaries:
+                stat["unique_catches"] = []
+
+        repo = "anonymized-repository"
+
+    if anonymize_summaries and model:
+        print("  Generalizing concern summaries with LLM...")
+        concern_dicts = generalize_summaries_with_llm(model, model_type, concern_dicts)
+
+        for cluster in cluster_dicts:
+            cluster["concerns"] = generalize_summaries_with_llm(
+                model, model_type, cluster["concerns"]
+            )
+            if cluster["concerns"]:
+                cluster["representative_summary"] = cluster["concerns"][0]["summary"]
+
+    return {
+        "version": "1.0",
+        "generated_at": datetime.now().isoformat(),
+        "metadata": {
+            "repository": repo,
+            "prs_analyzed": prs_analyzed,
+            "total_concerns": len(concerns),
+            "total_clusters": len(clusters),
+            "anonymized": anonymize,
+        },
+        "concerns": concern_dicts,
+        "clusters": cluster_dicts,
+        "stats": stats_dicts,
+        "report": report if not anonymize else None,
+    }
 
 
 def create_model(use_vertex: bool = False, project: str | None = None):
@@ -952,6 +1167,23 @@ def main():
         default=None,
         help="GCP project ID for Vertex AI"
     )
+    parser.add_argument(
+        "--save-data",
+        type=str,
+        default=None,
+        metavar="FILE",
+        help="Save extracted analysis data to JSON file"
+    )
+    parser.add_argument(
+        "--anonymize",
+        action="store_true",
+        help="Anonymize data when saving (requires --save-data)"
+    )
+    parser.add_argument(
+        "--anonymize-summaries",
+        action="store_true",
+        help="Use LLM to generalize concern summaries (slower, more thorough)"
+    )
     args = parser.parse_args()
 
     # Set global repo
@@ -1012,6 +1244,32 @@ def main():
 
     # Generate report
     report = generate_report(stats, clusters, len(pr_numbers), REPO)
+
+    # Save data if requested
+    if args.save_data:
+        if args.anonymize_summaries and not args.anonymize:
+            print("Warning: --anonymize-summaries requires --anonymize, ignoring.")
+            args.anonymize_summaries = False
+
+        print(f"\nExporting analysis data...")
+        export_data = export_analysis_data(
+            concerns=all_concerns,
+            clusters=clusters,
+            stats=stats,
+            report=report,
+            repo=REPO,
+            prs_analyzed=len(pr_numbers),
+            anonymize=args.anonymize,
+            anonymize_summaries=args.anonymize_summaries,
+            model=model if args.anonymize_summaries else None,
+            model_type=model_type if args.anonymize_summaries else None,
+        )
+
+        with open(args.save_data, "w") as f:
+            json.dump(export_data, f, indent=2)
+
+        mode = "anonymized" if args.anonymize else "raw"
+        print(f"Data saved to: {args.save_data} ({mode} mode)")
 
     # Output
     if args.output:

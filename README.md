@@ -78,12 +78,15 @@ python scripts/analyze-ai-reviewers.py \
 ### Options
 
 ```
---repo, -r     GitHub repository (owner/name) [required]
---prs, -n      Number of PRs to analyze (default: 20)
---output, -o   Output file for report (default: stdout)
---verbose, -v  Show detailed progress
---vertex       Use Vertex AI instead of Google AI Studio
---project, -p  GCP project ID for Vertex AI
+--repo, -r              GitHub repository (owner/name) [required]
+--prs, -n               Number of PRs to analyze (default: 20)
+--output, -o            Output file for report (default: stdout)
+--verbose, -v           Show detailed progress
+--vertex                Use Vertex AI instead of Google AI Studio
+--project, -p           GCP project ID for Vertex AI
+--save-data FILE        Save extracted analysis data to JSON file
+--anonymize             Anonymize data when saving (requires --save-data)
+--anonymize-summaries   Use LLM to generalize concern summaries (slower)
 ```
 
 ### Examples
@@ -103,6 +106,27 @@ python scripts/analyze-ai-reviewers.py \
   --repo your-org/your-repo \
   --prs 50 \
   --verbose
+
+# Save raw analysis data for further processing
+python scripts/analyze-ai-reviewers.py \
+  --repo your-org/your-repo \
+  --prs 50 \
+  --save-data analysis.json
+
+# Save anonymized data for sharing (strips identifiers)
+python scripts/analyze-ai-reviewers.py \
+  --repo your-org/your-repo \
+  --prs 50 \
+  --save-data analysis-anon.json \
+  --anonymize
+
+# Anonymize with LLM-generalized summaries (most thorough)
+python scripts/analyze-ai-reviewers.py \
+  --repo your-org/your-repo \
+  --prs 50 \
+  --save-data analysis-anon.json \
+  --anonymize \
+  --anonymize-summaries
 ```
 
 ## Sample Output
@@ -150,6 +174,46 @@ The tool clusters concerns **per-PR** to answer: "Did multiple reviewers catch t
 ### Unique Value Calculation
 
 A concern is "unique" if only one reviewer raised it on that PR. The **unique rate** shows what percentage of a reviewer's concerns provide differentiated value.
+
+## Data Preservation
+
+Use `--save-data` to export the full analysis for further processing or sharing.
+
+### Raw Mode
+
+Saves all extracted data including original text snippets, file paths, and PR numbers:
+
+```bash
+python scripts/analyze-ai-reviewers.py --repo owner/repo --prs 50 --save-data analysis.json
+```
+
+### Anonymized Mode
+
+For sharing analysis results without revealing codebase details:
+
+```bash
+python scripts/analyze-ai-reviewers.py --repo owner/repo --prs 50 \
+  --save-data analysis.json --anonymize
+```
+
+Anonymization applies:
+- Repository name → `anonymized-repository`
+- PR numbers → sequential IDs (`PR-001`, `PR-002`, ...)
+- File paths → hashed with extension preserved (`file-001.ts`)
+- Line numbers → removed
+- Original text snippets → removed
+- Statistics and severity/category distributions → preserved
+
+### LLM Summary Generalization
+
+For thorough anonymization, add `--anonymize-summaries` to strip code-specific details from concern summaries using the LLM:
+
+```bash
+python scripts/analyze-ai-reviewers.py --repo owner/repo --prs 50 \
+  --save-data analysis.json --anonymize --anonymize-summaries
+```
+
+This transforms summaries like "Missing null check in getUserEmail()" to "Missing null check in function return value".
 
 ## Rate Limiting
 
