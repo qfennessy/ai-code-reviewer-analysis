@@ -29,7 +29,7 @@ Usage:
     # With Vertex AI (uses ADC):
     python scripts/analyze-ai-reviewers.py --vertex --project your-project --repo owner/repo
 
-Author: https://github.com/qredek
+Author: https://github.com/qfennessy
 License: MIT
 """
 
@@ -50,26 +50,18 @@ from typing import Optional
 MIN_REQUEST_INTERVAL = 0.1  # 100ms between requests
 RATE_LIMIT_BUFFER = 100  # Pause when fewer than this many requests remain
 RATE_LIMIT_PAUSE = 60  # Seconds to pause when approaching rate limit
+SUBPROCESS_TIMEOUT = 300  # 5 minute timeout for subprocess calls
 _last_request_time: float = 0.0
 
 # Global repo variable (set from args)
 REPO: str = ""
 
 try:
-    import google.generativeai as genai
-except ImportError:
-    genai = None
-
-try:
-    from google import genai as vertexai_genai
+    from google import genai
     from google.genai import types as genai_types
 except ImportError:
-    vertexai_genai = None
-
-if not genai and not vertexai_genai:
-    print("Error: No Google AI SDK found.")
-    print("Install with: pip install google-generativeai")
-    print("Or for Vertex AI: pip install google-genai")
+    print("Error: google-genai package not found.")
+    print("Install with: pip install google-genai")
     sys.exit(1)
 
 
@@ -395,21 +387,16 @@ def export_analysis_data(
 
 
 def create_model(use_vertex: bool = False, project: str | None = None):
-    """Create a generative model using API key or Vertex AI with ADC.
+    """Create a generative model client using API key or Vertex AI with ADC.
 
     Args:
         use_vertex: If True, use Vertex AI with Application Default Credentials.
         project: GCP project ID (required for Vertex AI if GCP_PROJECT_ID not set).
 
     Returns:
-        A tuple of (model/client, model_type).
+        A tuple of (client, model_type). model_type is always "genai" now.
     """
     if use_vertex:
-        if not vertexai_genai:
-            print("Error: google-genai package not found for Vertex AI.")
-            print("Install with: pip install google-genai")
-            sys.exit(1)
-
         # Check for project - require explicit setting, no hidden defaults
         if not project:
             project = os.environ.get("GCP_PROJECT_ID")
@@ -419,27 +406,25 @@ def create_model(use_vertex: bool = False, project: str | None = None):
             sys.exit(1)
 
         print(f"Using Vertex AI with project: {project}, model: {DEFAULT_MODEL}")
-        client = vertexai_genai.Client(
+        client = genai.Client(
             vertexai=True,
             project=project,
             location="us-central1"
         )
-        return client, "vertex"
     else:
-        if not genai:
-            print("Error: google-generativeai package not found.")
-            print("Install with: pip install google-generativeai")
-            sys.exit(1)
-
-        api_key = os.environ.get("GOOGLE_API_KEY")
+        # Check for API key in environment (GOOGLE_API_KEY or GEMINI_API_KEY)
+        api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
         if not api_key:
-            print("Error: GOOGLE_API_KEY environment variable not set.")
+            print("Error: No API key found.")
+            print("Set GOOGLE_API_KEY or GEMINI_API_KEY environment variable.")
             print("Get an API key from: https://aistudio.google.com/")
             print("Or use --vertex flag to use Vertex AI with ADC.")
             sys.exit(1)
 
-        genai.configure(api_key=api_key)
-        return genai.GenerativeModel(DEFAULT_MODEL), "genai"
+        print(f"Using Google AI with API key, model: {DEFAULT_MODEL}")
+        client = genai.Client(api_key=api_key)
+
+    return client, "genai"
 
 
 def identify_reviewer(author: str) -> Optional[str]:
@@ -461,11 +446,11 @@ def check_rate_limit() -> tuple[int, int]:
     try:
         result = subprocess.run(
             ["gh", "api", "rate_limit", "--jq", ".rate"],
-            capture_output=True, text=True, check=True
+            capture_output=True, text=True, check=True, timeout=SUBPROCESS_TIMEOUT
         )
         data = json.loads(result.stdout)
         return data.get("remaining", 5000), data.get("reset", 0)
-    except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError) as e:
         print(f"\n  Warning: Could not check GitHub rate limit due to {type(e).__name__}. Assuming a low limit to be safe.")
         return 10, 0  # Assume a very low limit to trigger a pause if needed
 
@@ -499,14 +484,22 @@ def rate_limited_api_call(cmd: list[str], check_limit: bool = True) -> subproces
             time.sleep(wait_time)
 
     _last_request_time = time.time()
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        print(f"\n  Warning: Command timed out after {SUBPROCESS_TIMEOUT}s")
+        return subprocess.CompletedProcess(cmd, 1, "", "timeout")
 
     # Check for rate limit error and retry after waiting
     if result.returncode != 0 and "rate limit" in (result.stderr or "").lower():
         print("\n  Rate limited. Waiting 60s before retry...")
         time.sleep(RATE_LIMIT_PAUSE)
         _last_request_time = time.time()
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            print(f"\n  Warning: Retry timed out after {SUBPROCESS_TIMEOUT}s")
+            return subprocess.CompletedProcess(cmd, 1, "", "timeout")
 
     return result
 
@@ -542,7 +535,7 @@ def fetch_prs_with_ai_reviews(limit: int = 50) -> list[int]:
         ]
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=SUBPROCESS_TIMEOUT)
             batch_prs = json.loads(result.stdout)
 
             if not batch_prs:
@@ -566,15 +559,15 @@ def fetch_prs_with_ai_reviews(limit: int = 50) -> list[int]:
             if len(batch_prs) < batch_size or batch >= 1:
                 break
 
-        except subprocess.CalledProcessError as e:
-            print(f"Error fetching PRs (batch {batch}): {e.stderr}")
-            if batch == 1:
-                return []
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            error_msg = getattr(e, 'stderr', str(e))
+            print(f"  Search failed (batch {batch}): {error_msg[:100] if error_msg else 'unknown'}")
+            print("  Falling back to API method...")
             break
 
-    # If we need more PRs, fall back to direct API call with pagination
+    # If we need more PRs (or search failed), fall back to direct API call
     if len(pr_numbers) < limit:
-        print("  Fetching additional PRs via API...")
+        print("  Fetching PRs via API...")
         pr_numbers = fetch_prs_via_api(limit, seen_prs)
 
     print(f"Found {len(pr_numbers)} PRs total")
@@ -701,38 +694,26 @@ def filter_ai_comments(comments: list[dict]) -> dict[str, list[dict]]:
     return ai_comments
 
 
-def generate_content(model, model_type: str, prompt: str) -> str:
-    """Generate content using the appropriate API based on model type.
+def generate_content(client, model_type: str, prompt: str) -> str:
+    """Generate content using the google-genai SDK.
 
     Args:
-        model: The model or client instance.
-        model_type: Either 'vertex' or 'genai'.
+        client: The genai.Client instance.
+        model_type: Kept for API compatibility (always 'genai' now).
         prompt: The prompt to send.
 
     Returns:
         The generated text response.
     """
-    if model_type == "vertex":
-        # Vertex AI (google-genai SDK)
-        response = model.models.generate_content(
-            model=DEFAULT_MODEL,
-            contents=prompt,
-            config=genai_types.GenerateContentConfig(
-                temperature=0.1,
-                response_mime_type="application/json"
-            )
+    response = client.models.generate_content(
+        model=DEFAULT_MODEL,
+        contents=prompt,
+        config=genai_types.GenerateContentConfig(
+            temperature=0.1,
+            response_mime_type="application/json"
         )
-        return response.text
-    else:
-        # Google AI (google-generativeai SDK)
-        response = model.generate_content(
-            prompt,
-            generation_config=genai.GenerationConfig(
-                temperature=0.1,
-                response_mime_type="application/json"
-            )
-        )
-        return response.text
+    )
+    return response.text
 
 
 def extract_concerns_with_llm(
