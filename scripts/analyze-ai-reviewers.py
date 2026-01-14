@@ -286,6 +286,151 @@ Return a JSON array of generalized summaries in the same order."""
         return concerns
 
 
+def generate_report_from_dicts(
+    stats_dicts: dict[str, dict],
+    cluster_dicts: list[dict],
+    prs_analyzed: int,
+    repo: str,
+) -> str:
+    """Generate markdown report from anonymized dictionary data.
+
+    This is used when generating reports from anonymized export data to ensure
+    the report uses the same anonymized summaries as the JSON export.
+    """
+    today = date.today().isoformat()
+
+    # Get active reviewers (those with comments)
+    active_reviewers = [r for r in stats_dicts.keys() if stats_dicts[r]["total_comments"] > 0]
+
+    lines = [
+        "# LLM-as-Judge Analysis Results",
+        "",
+        f"**Repository**: {repo}",
+        f"**Date**: {today}",
+        f"**PRs Analyzed**: {prs_analyzed}",
+        f"**Total Concerns Extracted**: {sum(s['total_concerns'] for s in stats_dicts.values())}",
+        f"**Unique Concern Clusters**: {len(cluster_dicts)}",
+        "",
+        "## Summary by Reviewer",
+        "",
+        "| Reviewer | Comments | Concerns | Unique Catches | Unique Rate |",
+        "|----------|----------|----------|----------------|-------------|",
+    ]
+
+    for reviewer in active_reviewers:
+        s = stats_dicts[reviewer]
+        unique_rate = f"{(s['unique_concerns'] / s['total_concerns'] * 100):.1f}%" if s['total_concerns'] > 0 else "N/A"
+        lines.append(f"| **{reviewer.title()}** | {s['total_comments']} | {s['total_concerns']} | {s['unique_concerns']} | {unique_rate} |")
+
+    lines.extend([
+        "",
+        "## Concern Severity Distribution",
+        "",
+        "| Reviewer | Critical | High | Medium | Low |",
+        "|----------|----------|------|--------|-----|",
+    ])
+
+    for reviewer in active_reviewers:
+        s = stats_dicts[reviewer]
+        sev = s["concerns_by_severity"]
+        lines.append(f"| **{reviewer.title()}** | {sev.get('critical', 0)} | {sev.get('high', 0)} | {sev.get('medium', 0)} | {sev.get('low', 0)} |")
+
+    lines.extend([
+        "",
+        "## Concern Category Distribution",
+        "",
+        "| Reviewer | Bug | Security | Performance | Type Safety | Error Handling |",
+        "|----------|-----|----------|-------------|-------------|----------------|",
+    ])
+
+    for reviewer in active_reviewers:
+        s = stats_dicts[reviewer]
+        cat = s["concerns_by_category"]
+        lines.append(
+            f"| **{reviewer.title()}** | {cat.get('bug', 0)} | {cat.get('security', 0)} | "
+            f"{cat.get('performance', 0)} | {cat.get('type_safety', 0)} | {cat.get('error_handling', 0)} |"
+        )
+
+    # Unique catches by reviewer
+    lines.extend([
+        "",
+        "## Unique Catches by Reviewer",
+        "",
+        "Issues found by ONLY that reviewer (not caught by others on the same PR):",
+        "",
+    ])
+
+    for reviewer in active_reviewers:
+        s = stats_dicts[reviewer]
+        lines.append(f"### {reviewer.title()} ({s['unique_concerns']} unique)")
+        lines.append("")
+        if s["unique_catches"]:
+            for catch in s["unique_catches"][:10]:  # Top 10
+                lines.append(f"- {catch}")
+        else:
+            lines.append("- No unique catches found")
+        lines.append("")
+
+    # Overlapping concerns
+    overlap_clusters = [c for c in cluster_dicts if not c["is_unique"]]
+    lines.extend([
+        "## Overlapping Concerns",
+        "",
+        f"Concerns raised by multiple reviewers: **{len(overlap_clusters)}**",
+        "",
+    ])
+
+    if overlap_clusters:
+        for cluster in overlap_clusters[:10]:  # Top 10
+            reviewers = ", ".join(sorted(cluster["reviewers"]))
+            lines.append(f"- **{cluster['representative_summary']}** ({reviewers})")
+
+    # Recommendations
+    lines.extend([
+        "",
+        "## Recommendations",
+        "",
+    ])
+
+    # Find highest unique catch rate
+    active_stats = [stats_dicts[r] for r in active_reviewers if stats_dicts[r]["total_concerns"] > 0]
+    if active_stats:
+        best_unique = max(active_stats, key=lambda s: s["unique_concerns"])
+        best_signal = max(
+            active_stats,
+            key=lambda s: s["unique_concerns"] / s["total_concerns"] if s["total_concerns"] > 0 else 0
+        )
+
+        lines.extend([
+            f"1. **Highest unique catch count**: {best_unique['name'].title()} ({best_unique['unique_concerns']} unique concerns)",
+            f"2. **Highest signal-to-noise ratio**: {best_signal['name'].title()} "
+            f"({best_signal['unique_concerns']}/{best_signal['total_concerns']} concerns are unique)",
+            "",
+            "### Reviewer Value Assessment",
+            "",
+        ])
+
+        for reviewer in active_reviewers:
+            s = stats_dicts[reviewer]
+            if s["total_concerns"] == 0:
+                continue
+            unique_pct = (s["unique_concerns"] / s["total_concerns"] * 100)
+            critical_high = s["concerns_by_severity"].get("critical", 0) + s["concerns_by_severity"].get("high", 0)
+
+            if unique_pct > 30 and critical_high > 0:
+                assessment = "HIGH VALUE - catches unique critical/high issues"
+            elif unique_pct > 20:
+                assessment = "GOOD VALUE - decent unique catch rate"
+            elif s["total_concerns"] > 50 and unique_pct < 10:
+                assessment = "REVIEW NEEDED - high volume, low unique value"
+            else:
+                assessment = "MODERATE VALUE"
+
+            lines.append(f"- **{reviewer.title()}**: {assessment}")
+
+    return "\n".join(lines)
+
+
 def export_analysis_data(
     concerns: list[Concern],
     clusters: list[ConcernCluster],
@@ -313,11 +458,13 @@ def export_analysis_data(
         model_type: Model type (required if anonymize_summaries=True).
 
     Returns:
-        Dictionary ready for JSON serialization.
+        Dictionary ready for JSON serialization. When anonymize=True, the 'report'
+        field contains an anonymized markdown report generated from the anonymized data.
     """
     concern_dicts = [concern_to_dict(c) for c in concerns]
     cluster_dicts = [cluster_to_dict(c) for c in clusters]
     stats_dicts = {name: stats_to_dict(s) for name, s in stats.items()}
+    display_repo = repo
 
     if anonymize:
         anonymizer = Anonymizer()
@@ -335,11 +482,12 @@ def export_analysis_data(
             anon_clusters.append(anon_cluster)
         cluster_dicts = anon_clusters
 
+        # Clear unique_catches when anonymizing since they contain original summaries
+        # (unless anonymize_summaries will generalize them)
         for stat in stats_dicts.values():
-            if anonymize_summaries:
-                stat["unique_catches"] = []
+            stat["unique_catches"] = []
 
-        repo = "anonymized-repository"
+        display_repo = "anonymized-repository"
 
     if anonymize_summaries and model:
         print("  Generalizing concern summaries with LLM...")
@@ -349,6 +497,11 @@ def export_analysis_data(
             all_summaries.add(cluster["representative_summary"])
             for c in cluster["concerns"]:
                 all_summaries.add(c["summary"])
+
+        # Also collect unique_catches summaries if we want to preserve them
+        for stat in stats_dicts.values():
+            for catch in stat.get("unique_catches", []):
+                all_summaries.add(catch)
 
         # Generalize all unique summaries in one call
         unique_summaries = list(all_summaries)
@@ -369,11 +522,26 @@ def export_analysis_data(
             for c in cluster["concerns"]:
                 c["summary"] = summary_map.get(c["summary"], c["summary"])
 
+    # Rebuild unique_catches from anonymized/generalized cluster data
+    if anonymize:
+        for stat in stats_dicts.values():
+            stat["unique_catches"] = []
+        for cluster in cluster_dicts:
+            if cluster["is_unique"] and cluster["concerns"]:
+                reviewer = cluster["concerns"][0]["reviewer"]
+                if reviewer in stats_dicts:
+                    stats_dicts[reviewer]["unique_catches"].append(cluster["representative_summary"])
+
+    # Generate report from anonymized data when anonymizing
+    output_report = report
+    if anonymize:
+        output_report = generate_report_from_dicts(stats_dicts, cluster_dicts, prs_analyzed, display_repo)
+
     return {
         "version": "1.0",
         "generated_at": datetime.now().isoformat(),
         "metadata": {
-            "repository": repo,
+            "repository": display_repo,
             "prs_analyzed": prs_analyzed,
             "total_concerns": len(concerns),
             "total_clusters": len(clusters),
@@ -382,7 +550,7 @@ def export_analysis_data(
         "concerns": concern_dicts,
         "clusters": cluster_dicts,
         "stats": stats_dicts,
-        "report": report if not anonymize else None,
+        "report": output_report,
     }
 
 
@@ -1259,6 +1427,12 @@ def main():
             print("Warning: --anonymize-summaries requires --anonymize, ignoring.")
             args.anonymize_summaries = False
 
+        # Validate --save-data doesn't use .md extension to prevent overwrite
+        if args.save_data.lower().endswith(".md"):
+            print("Error: --save-data path cannot end with .md (would conflict with report file)")
+            print("Use a .json extension instead, e.g.: --save-data analysis.json")
+            sys.exit(1)
+
         print(f"\nExporting analysis data...")
         export_data = export_analysis_data(
             concerns=all_concerns,
@@ -1279,16 +1453,10 @@ def main():
         mode = "anonymized" if args.anonymize else "raw"
         print(f"Data saved to: {args.save_data} ({mode} mode)")
 
-        # Also save markdown report
+        # Also save markdown report (use report from export_data for consistency)
         report_path = args.save_data.rsplit(".", 1)[0] + ".md"
-        if args.anonymize:
-            # Generate anonymized version of report
-            anon_report = generate_report(stats, clusters, len(pr_numbers), REPO, anonymize=True)
-            with open(report_path, "w") as f:
-                f.write(anon_report)
-        else:
-            with open(report_path, "w") as f:
-                f.write(report)
+        with open(report_path, "w") as f:
+            f.write(export_data["report"])
         print(f"Report saved to: {report_path}")
 
     # Output
